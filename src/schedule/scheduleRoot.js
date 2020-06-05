@@ -1,12 +1,31 @@
-import { TAG_ROOT, ELEMENT_TEXT, TAG_TEXT, TAG_HOST, PLACEMENT } from './constants';
+import { TAG_ROOT, ELEMENT_TEXT, TAG_TEXT, TAG_HOST, PLACEMENT, DELETION, UPDATE } from './constants';
 import { setProps } from './utils';
 
 let nextUnitOfWork = null;
 let workInProgressRoot = null;
+let currentRoot = null; //当前根fiber
+let deletions = []; // 需要删除的fiber
 
 // 修改nextUnitOfWork workInProgressRoot
 export function scheduleRoot(rootFiber) {
-    workInProgressRoot = rootFiber;
+    // 双缓冲缓存，复用之前的fiber树
+    if (currentRoot && currentRoot.alternate) {
+        // 偶数次更新
+        workInProgressRoot = currentRoot.alternate;
+        workInProgressRoot.firstEffect = workInProgressRoot.lastEffect = workInProgressRoot.nextEffect = null;
+        workInProgressRoot.props = rootFiber.props;
+        workInProgressRoot.alternate = currentRoot;
+    } else if (currentRoot) {
+        // 奇数次更新
+        // 当前的rootFiber挂载当前的currentRoot
+        rootFiber.alternate = currentRoot;
+        // 需处理的root更新为rootFiber
+        workInProgressRoot = rootFiber;
+    } else {
+        // 第一次渲染
+        workInProgressRoot = rootFiber;
+    }
+
     nextUnitOfWork = workInProgressRoot;
 }
 
@@ -43,6 +62,8 @@ function workLoop(deadline) {
 
 // 提交阶段
 function commitRoot() {
+    // 删除需要删除的fiber
+    deletions.forEach(commitWork);
     let currentFiber = workInProgressRoot.firstEffect;
 
     while (currentFiber) {
@@ -51,9 +72,13 @@ function commitRoot() {
     }
 
     console.log('commit结束');
+    deletions.length = 0;
+    // commit阶段结束更新currentRoot
+    currentRoot = workInProgressRoot;
     workInProgressRoot = null;
 }
 
+// commit任务
 function commitWork(currentFiber) {
     if (!currentFiber) return;
     const returnFiber = currentFiber.return;
@@ -61,6 +86,16 @@ function commitWork(currentFiber) {
 
     if (currentFiber.effectTag === PLACEMENT) {
         retrunDom.appendChild(currentFiber.stateNode);
+    } else if (currentFiber.effectTag === DELETION) {
+        retrunDom.removeChild(currentFiber.stateNode);
+    } else if (currentFiber.effectTag === UPDATE) {
+        if (currentFiber.type === ELEMENT_TEXT) {
+            if (currentFiber.alternate.props.text !== currentFiber.props.text) {
+                currentFiber.stateNode.textContent = currentFiber.props.text;
+            }
+        } else {
+            updateDom(currentFiber.stateNode, currentFiber.alternate.props, currentFiber.props);
+        }
     }
 }
 
@@ -112,12 +147,13 @@ function createDom(currentFiber) {
         return document.createTextNode(currentFiber.props.text);
     } else if (currentFiber.tag === TAG_HOST) {
         const stateNode = document.createElement(currentFiber.type);
-        updateProps(stateNode, {}, currentFiber);
+        updateDom(stateNode, {}, currentFiber);
         return stateNode;
     }
 }
 
 function updateHostRoot(rootFiber) {
+    console.log(rootFiber);
     const newChildren = rootFiber.props.children;
     reconcileChildren(rootFiber, newChildren);
 }
@@ -139,7 +175,7 @@ function updateHost(currentFiber) {
 }
 
 // 更新属性
-function updateProps(stateNode, oldProps, currentFiber) {
+function updateDom(stateNode, oldProps, currentFiber) {
     setProps(stateNode, oldProps, currentFiber.props);
 }
 
@@ -147,27 +183,63 @@ function updateProps(stateNode, oldProps, currentFiber) {
 function reconcileChildren(currentFiber, newChildren) {
     let newChildrenIndex = 0;
     let prevSibling = null;
+    // 获取旧的fiber里面的第一个子fiber
+    let oldFiber = currentFiber.alternate && currentFiber.alternate.child;
 
-    while (newChildrenIndex < newChildren.length) {
+    while (newChildrenIndex < newChildren.length || oldFiber) {
         let newChild = newChildren[newChildrenIndex];
-        let tag;
+        let tag, newFiber;
+        // 判断新老fiber的type是否一致
+        const sameType = oldFiber && newChild && oldFiber.type === newChild.type;
 
         // 这里判断是原生节点还是文本节点
-        if (newChild.type === ELEMENT_TEXT) {
+        if (newChild && newChild.type === ELEMENT_TEXT) {
             tag = TAG_TEXT;
-        } else if (typeof newChild.type === 'string') {
+        } else if (newChild && typeof newChild.type === 'string') {
             tag = TAG_HOST;
         }
 
-        let newFiber = {
-            tag,
-            type: newChild.type,
-            props: newChild.props,
-            stateNode: newChild.stateNode,
-            return: currentFiber,
-            effectTag: PLACEMENT,
-            nextEffect: null,
-        };
+        if (sameType) {
+            if (oldFiber.alternate) {
+                newFiber = oldFiber.alternate;
+                newFiber.props = newChild.props;
+                newFiber.alternate = oldFiber;
+                newFiber.effectTag = UPDATE;
+                newFiber.nextEffect = null;
+            } else {
+                newFiber = {
+                    tag: oldFiber.tag,
+                    type: oldFiber.tag,
+                    props: newChild.props,
+                    stateNode: oldFiber.stateNode,
+                    return: currentFiber,
+                    effectTag: UPDATE,
+                    nextEffect: null,
+                    alternate: oldFiber,
+                };
+            }
+        } else {
+            if (newChild) {
+                newFiber = {
+                    tag,
+                    type: newChild.type,
+                    props: newChild.props,
+                    stateNode: newChild.stateNode,
+                    return: currentFiber,
+                    effectTag: PLACEMENT,
+                    nextEffect: null,
+                };
+            }
+
+            if (oldFiber) {
+                oldFiber.effectTag = DELETION;
+                deletions.push(oldFiber);
+            }
+        }
+
+        if (oldFiber) {
+            oldFiber = oldFiber.sibling;
+        }
 
         if (newFiber) {
             if (newChildrenIndex === 0) {
